@@ -1,0 +1,225 @@
+id: fastf1_to_redshift
+namespace: f1.dw
+
+inputs:
+  - name: season
+    type: INT
+    defaults: 2024
+  - name: gp
+    type: STRING
+    defaults: Monza
+  - name: session
+    type: STRING
+    defaults: Q   # FP1/FP2/FP3/Q/R
+
+tasks:
+  - id: extract_fastf1_to_s3
+    type: io.kestra.plugin.scripts.python.Script
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      image: python:3.11-slim      # <-- changed from containerImage -> image
+      pullPolicy: ALWAYS
+    beforeCommands:
+      - pip install fastf1 boto3 pandas pyarrow
+    env:
+      AWS_ACCESS_KEY_ID: "{{ envs.AWS_ACCESS_KEY_ID }}"
+      AWS_SECRET_ACCESS_KEY: "{{ envs.AWS_SECRET_ACCESS_KEY }}"
+      AWS_REGION: "{{ envs.AWS_REGION }}"
+      S3_BUCKET: "{{ envs.S3_BUCKET }}"
+      S3_PREFIX: "{{ envs.S3_PREFIX }}"
+      FASTF1_CACHE: "/tmp/fastf1_cache"
+    script: |
+      import os, io
+      from pathlib import Path
+      from datetime import datetime
+      import boto3, pandas as pd, fastf1
+      import pyarrow as pa, pyarrow.parquet as pq
+
+      season={{ inputs.season }}; gp="{{ inputs.gp }}"; sess="{{ inputs.session }}"
+      Path(os.environ["FASTF1_CACHE"]).mkdir(parents=True, exist_ok=True)
+      fastf1.Cache.enable_cache(os.environ["FASTF1_CACHE"])
+
+      s = fastf1.get_session(season, gp, sess)
+      s.load(laps=True, telemetry=False, weather=True)
+
+      def td(x):
+          try:
+              return int(x.total_seconds() * 1000)
+          except Exception:
+              return None
+
+      laps = s.laps.copy()
+      lap_df = pd.DataFrame({
+        "season": season, "gp": gp, "session_type": sess,
+        "driver_code": laps["Driver"].astype("string"),
+        "driver_number": pd.to_numeric(laps.get("DriverNumber"), errors="coerce"),
+        "team_name": laps.get("Team"),
+        "lap_number": pd.to_numeric(laps["LapNumber"], errors="coerce"),
+        "lap_time_ms": laps["LapTime"].apply(td),
+        "sector1_ms": laps.get("Sector1Time").apply(td) if "Sector1Time" in laps else None,
+        "sector2_ms": laps.get("Sector2Time").apply(td) if "Sector2Time" in laps else None,
+        "sector3_ms": laps.get("Sector3Time").apply(td) if "Sector3Time" in laps else None,
+        "is_pit_out_lap": laps.get("PitOutTime").notna() if "PitOutTime" in laps else False,
+        "is_pit_in_lap": laps.get("PitInTime").notna() if "PitInTime" in laps else False,
+        "compound": laps.get("Compound"),
+        "stint_number": pd.to_numeric(laps.get("Stint"), errors="coerce"),
+        "track_status": laps.get("TrackStatus"),
+        "session_start_utc": pd.to_datetime(s.date, utc=True),
+        "circuit_name": s.event.get("Location") if hasattr(s, "event") else None
+      })
+
+      wx = s.weather_data.copy()
+      weather_df = pd.DataFrame({
+        "season": season, "gp": gp, "session_type": sess,
+        "time_utc": pd.to_datetime(wx["Time"], utc=True),
+        "air_temp_c": pd.to_numeric(wx.get("AirTemp"), errors="coerce"),
+        "track_temp_c": pd.to_numeric(wx.get("TrackTemp"), errors="coerce"),
+        "humidity_pct": pd.to_numeric(wx.get("Humidity"), errors="coerce"),
+        "pressure_hpa": pd.to_numeric(wx.get("Pressure"), errors="coerce"),
+        "wind_speed_mps": pd.to_numeric(wx.get("WindSpeed"), errors="coerce"),
+        "wind_dir_deg": pd.to_numeric(wx.get("WindDirection"), errors="coerce"),
+        "rain": wx.get("Rainfall", False).astype(bool) if "Rainfall" in wx else False
+      })
+
+      s3 = boto3.client("s3", region_name=os.environ["AWS_REGION"])
+      def up_parquet(df, key):
+          buf = io.BytesIO()
+          pq.write_table(pa.Table.from_pandas(df), buf)
+          buf.seek(0)
+          s3.upload_fileobj(buf, os.environ["S3_BUCKET"], key)
+
+      ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+      base = os.environ.get("S3_PREFIX", "fastf1")
+      up_parquet(lap_df,     f"{base}/laps/season={season}/gp={gp}/session={sess}/part-{ts}.parquet")
+      up_parquet(weather_df, f"{base}/weather/season={season}/gp={gp}/session={sess}/part-{ts}.parquet")
+
+  - id: copy_laps
+    type: io.kestra.plugin.jdbc.redshift.Query
+    url: "{{ envs.REDSHIFT_JDBC_URL }}"
+    username: "{{ envs.REDSHIFT_USER }}"
+    password: "{{ envs.REDSHIFT_PASSWORD }}"
+    sql: |
+      copy stage.lap_stage
+      from 's3://{{ envs.S3_BUCKET }}/{{ envs.S3_PREFIX }}/laps/season={{ inputs.season }}/gp={{ inputs.gp }}/session={{ inputs.session }}/'
+      iam_role '{{ envs.REDSHIFT_ROLE_ARN }}'
+      format as parquet;
+
+  - id: copy_weather
+    type: io.kestra.plugin.jdbc.redshift.Query
+    url: "{{ envs.REDSHIFT_JDBC_URL }}"
+    username: "{{ envs.REDSHIFT_USER }}"
+    password: "{{ envs.REDSHIFT_PASSWORD }}"
+    sql: |
+      copy stage.weather_stage
+      from 's3://{{ envs.S3_BUCKET }}/{{ envs.S3_PREFIX }}/weather/season={{ inputs.season }}/gp={{ inputs.gp }}/session={{ inputs.session }}/'
+      iam_role '{{ envs.REDSHIFT_ROLE_ARN }}'
+      format as parquet;
+
+  - id: upsert_dim_season
+    type: io.kestra.plugin.jdbc.redshift.Query
+    url: "{{ envs.REDSHIFT_JDBC_URL }}"
+    username: "{{ envs.REDSHIFT_USER }}"
+    password: "{{ envs.REDSHIFT_PASSWORD }}"
+    sql: |
+      merge into fastf1.dim_season d
+      using (select distinct season from stage.lap_stage) s
+      on d.season = s.season
+      when not matched then insert (season) values (s.season);
+
+  - id: upsert_dim_session
+    type: io.kestra.plugin.jdbc.redshift.Query
+    url: "{{ envs.REDSHIFT_JDBC_URL }}"
+    username: "{{ envs.REDSHIFT_USER }}"
+    password: "{{ envs.REDSHIFT_PASSWORD }}"
+    sql: |
+      merge into fastf1.dim_session ds
+      using (
+        select season, gp, session_type, min(session_start_utc) as session_start_utc
+        from stage.lap_stage
+        group by 1,2,3
+      ) s
+      on ds.season = s.season and ds.gp = s.gp and ds.session_type = s.session_type
+      when not matched then
+        insert (season, gp, session_type, session_start_utc)
+        values (s.season, s.gp, s.session_type, s.session_start_utc);
+
+  - id: upsert_dim_driver
+    type: io.kestra.plugin.jdbc.redshift.Query
+    url: "{{ envs.REDSHIFT_JDBC_URL }}"
+    username: "{{ envs.REDSHIFT_USER }}"
+    password: "{{ envs.REDSHIFT_PASSWORD }}"
+    sql: |
+      merge into fastf1.dim_driver d
+      using (
+        select driver_code, max(driver_number) as driver_number
+        from stage.lap_stage
+        where driver_code is not null
+        group by 1
+      ) s
+      on d.driver_code = s.driver_code
+      when not matched then
+        insert (driver_code, driver_number) values (s.driver_code, s.driver_number)
+      when matched and (d.driver_number is distinct from s.driver_number) then
+        update set driver_number = s.driver_number;
+
+  - id: upsert_dim_team
+    type: io.kestra.plugin.jdbc.redshift.Query
+    url: "{{ envs.REDSHIFT_JDBC_URL }}"
+    username: "{{ envs.REDSHIFT_USER }}"
+    password: "{{ envs.REDSHIFT_PASSWORD }}"
+    sql: |
+      merge into fastf1.dim_team t
+      using (select distinct team_name from stage.lap_stage where team_name is not null) s
+      on t.team_name = s.team_name
+      when not matched then insert (team_name) values (s.team_name);
+
+  - id: upsert_dim_tyre
+    type: io.kestra.plugin.jdbc.redshift.Query
+    url: "{{ envs.REDSHIFT_JDBC_URL }}"
+    username: "{{ envs.REDSHIFT_USER }}"
+    password: "{{ envs.REDSHIFT_PASSWORD }}"
+    sql: |
+      merge into fastf1.dim_tyre y
+      using (select distinct compound from stage.lap_stage where compound is not null) s
+      on y.compound = s.compound
+      when not matched then insert (compound) values (s.compound);
+
+  - id: upsert_dim_circuit
+    type: io.kestra.plugin.jdbc.redshift.Query
+    url: "{{ envs.REDSHIFT_JDBC_URL }}"
+    username: "{{ envs.REDSHIFT_USER }}"
+    password: "{{ envs.REDSHIFT_PASSWORD }}"
+    sql: |
+      merge into fastf1.dim_circuit c
+      using (select distinct circuit_name from stage.lap_stage where circuit_name is not null) s
+      on c.circuit_name = s.circuit_name
+      when not matched then insert (circuit_name) values (s.circuit_name);
+
+  - id: insert_fact_lap
+    type: io.kestra.plugin.jdbc.redshift.Query
+    url: "{{ envs.REDSHIFT_JDBC_URL }}"
+    username: "{{ envs.REDSHIFT_USER }}"
+    password: "{{ envs.REDSHIFT_PASSWORD }}"
+    sql: |
+      insert into fastf1.fact_lap (
+        session_key, driver_key, team_key, tyre_key, circuit_key,
+        lap_number, lap_time_ms, sector1_ms, sector2_ms, sector3_ms,
+        stint_number, is_pit_out_lap, is_pit_in_lap, track_status
+      )
+      select
+        ds.session_key,
+        dd.driver_key,
+        dt.team_key,
+        dy.tyre_key,
+        dc.circuit_key,
+        s.lap_number,
+        s.lap_time_ms, s.sector1_ms, s.sector2_ms, s.sector3_ms,
+        s.stint_number, s.is_pit_out_lap, s.is_pit_in_lap, s.track_status
+      from stage.lap_stage s
+      join fastf1.dim_session ds
+        on ds.season = s.season and ds.gp = s.gp and ds.session_type = s.session_type
+      left join fastf1.dim_driver  dd on dd.driver_code  = s.driver_code
+      left join fastf1.dim_team    dt on dt.team_name    = s.team_name
+      left join fastf1.dim_tyre    dy on dy.compound     = s.compound
+      left join fastf1.dim_circuit dc on dc.circuit_name = s.circuit_name
+      where s.season = {{ inputs.season }} and s.gp = '{{ inputs.gp }}' and s.session_type = '{{ inputs.session }}';
