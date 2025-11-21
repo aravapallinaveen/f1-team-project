@@ -1,0 +1,101 @@
+Project: F1 Tyre Performance Analytics
+
+Team:
+
+Scrum Master: Aswin Mathew John
+
+Product Owner: Chaitanya Uppalapati
+
+Developer 1: Naveen Aravapalli
+
+Developer 2: Siva Surya Chandran
+
+Sprint 1 (2025-11-03 to 2025-11-07)
+
+Sprint Goal: Deliver the first Power BI dashboard prototype showing tyre-compound usage & lap-time trends.
+Planning / Commitments:
+
+Set up FastF1 extraction script for race session telemetry (Naveen)
+
+Create S3 bucket + folder structure (laps/, weather/) (Siva)
+
+Define Redshift Serverless namespace & staging tables (Aswin)
+
+Build Power BI prototype connection and sample report for tyre-compound usage (Chaitanya)
+Stand-up / Summary: Extraction script begun; S3 structure created; Power BI connectivity validated. Minor blocker: weather attribute missing in initial extraction.
+Review & Retrospective: Prototype built; good foundation laid. Lessons: include full attribute list early; define folder structure upfront.
+
+Sprint 2 (2025-11-10 to 2025-11-14)
+
+Sprint Goal: Load full 2025 race weekend data into Redshift staging and enable dashboard drill down by year.
+Planning / Commitments:
+
+Expand extraction script to all 2025 race weekends (Naveen)
+
+Populate dimension tables: drivers, teams, tyre compounds (Siva)
+
+Load staging tables in Redshift and validate data (Aswin)
+
+Update Power BI visuals to filter by “Year 2023/2024/2025” (Chaitanya)
+Stand-up / Summary: Staging load completed; dashboard year filter implemented. Minor performance issue noticed with larger dataset.
+Review & Retrospective: Key deliverables achieved. Lessons: performance testing earlier; monitor load times when dataset size increases.
+
+Sprint 3 (2025-11-17 to 2025-11-21)
+
+Sprint Goal: Automate the pipeline from S3 arrival to Redshift loading and refresh dashboard filters for team & year.
+Planning / Commitments:
+
+Automate Kestra workflow trigger on S3 event (Aswin)
+
+Extract tyre-compound usage per team & season (Naveen)
+
+Update dim_tyres table to include Intermediate & Wet compounds (Siva)
+
+Build Power BI filter for “Team” and “Year (2023/2024/2025)” and update visuals (Chaitanya)
+Stand-up / Summary: Pipeline automation configured; compound mapping updated; filter UI built; performance tuning required.
+Review & Retrospective: Deliverables met. Lessons: Ensure ETL dependencies (mapping tables) completed before major tasks; schedule performance tuning earlier.
+
+Sprint 4 (2025-11-24 to 2025-11-28)
+
+Sprint Goal: Develop degradation analytics visuals in Power BI and integrate environmental variables into data warehouse.
+Planning / Commitments:
+
+Load weather data for each session into warehouse (Siva)
+
+Compute degradation metrics in fact table fact_tyre_performance (Naveen)
+
+Build Power BI visuals: lap-time progression by compound + weather correlation (Chaitanya)
+
+Optimize Redshift schema (sort/distribution keys) for large fact tables (Aswin)
+Stand-up / Summary: Weather data ingestion started; degradation metrics drafted; visuals mocked; schema optimisation in progress.
+Review & Retrospective: Good progress. Lessons: allocate time for data modelling and query optimisation; ensure visuals align with stakeholder expectations.
+
+Sprint 5 (2025-12-01 to 2025-12-05)
+
+Sprint Goal: Enable driver-level comparison visuals and pit-stop strategy dashboard layer.
+Planning / Commitments:
+
+Develop driver comparison fact view (Naveen)
+
+Build dashboard visuals: pit-stop timing & stint length analytics (Chaitanya)
+
+Enrich dimension tables with pit-stop metadata (Siva)
+
+Test Redshift query performance and dashboard load times with full season data (Aswin)
+Stand-up / Summary: Driver views built; pit-stop visuals under construction; database enriched; performance testing initiated.
+Review & Retrospective: Substantial functionality added. Lessons: build performance tests before UI rollout; manage stakeholder feedback early for complex visuals.
+
+Sprint 6 (2025-12-08 to 2025-12-12)
+
+Sprint Goal: Finalise dashboard release, set up automated refresh schedule, and provide project hand-over documentation.
+Planning / Commitments:
+
+Final dashboard build and user testing session (Chaitanya)
+
+Configure Power BI dataset refresh automation (Aswin)
+
+Create project documentation: data model, ETL pipeline, dashboard user guide (Siva)
+
+Review and clean up schema: archive old raw data, implement S3 lifecycle policies (Naveen)
+Stand-up / Summary: User testing completed; refresh automation configured; documentation drafted; archival policies set.
+Review & Retrospective: Project delivered. Lessons: schedule hand-over early; include maintenance tasks as backlog items; ensure all artifacts complete for submission.
